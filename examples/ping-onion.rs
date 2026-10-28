@@ -47,13 +47,14 @@ use futures::StreamExt;
 use libp2p::core::upgrade::Version;
 use libp2p::Transport;
 use libp2p::{
-    core::muxing::StreamMuxerBox,
+    core::{muxing::StreamMuxerBox, transport::timeout::TransportTimeout},
     identity, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
-    yamux, Multiaddr, PeerId, SwarmBuilder,
+    yamux, Multiaddr, PeerId, Swarm,
 };
 use libp2p_community_tor::{AddressConversion, TorTransport};
 use std::error::Error;
+use std::time::Duration;
 use tor_hsservice::config::OnionServiceConfigBuilder;
 
 /// Create a transport
@@ -111,17 +112,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Local peer id: {local_peer_id}");
 
-    let (transport, onion_listen_address) = onion_transport(local_key).await?;
+    let (transport, onion_listen_address) = onion_transport(local_key.clone()).await?;
 
-    let mut swarm = SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_other_transport(|_| transport)
-        .unwrap()
-        .with_behaviour(|_| Behaviour {
+    // Built with `Swarm::new`, not `SwarmBuilder`: `SwarmBuilder::build`
+    // limits every connection (dial and handshake) to 10 s, and a circuit to
+    // an onion service often takes longer from far away. The swarm's peer id
+    // must be the key Noise authenticates with.
+    let mut swarm = Swarm::new(
+        TransportTimeout::new(transport, Duration::from_secs(60)).boxed(),
+        Behaviour {
             ping: libp2p::ping::Behaviour::default(),
-        })
-        .unwrap()
-        .build();
+        },
+        local_peer_id,
+        libp2p::swarm::Config::with_tokio_executor(),
+    );
 
     // Dial the peer identified by the multi-address given as the second
     // command-line argument, if any.
